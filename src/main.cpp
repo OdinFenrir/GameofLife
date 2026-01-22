@@ -4,8 +4,8 @@
 #include <cmath>
 
 namespace {
-constexpr unsigned kWindowWidth = 1024;
-constexpr unsigned kWindowHeight = 768;
+constexpr unsigned kWindowWidth = 2560;
+constexpr unsigned kWindowHeight = 1440;
 
 sf::Color lerp(const sf::Color& a, const sf::Color& b, float t) {
     t = std::clamp(t, 0.f, 1.f);
@@ -143,4 +143,5 @@ int main() {
 
     return 0;
 }
+
 
