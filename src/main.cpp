@@ -1,4 +1,4 @@
-﻿#include <SFML/Graphics.hpp>
+#include <SFML/Graphics.hpp>
 
 #include <algorithm>
 #include <array>
@@ -271,8 +271,7 @@ struct Simulation {
                     {-1, 1},  {0, 1},  {1, 1},
                 }};
 
-                std::uniform_int_distribution<int> distStart(0, 7);
-                const int start = distStart(rng);
+                const int start = static_cast<int>(rng() % 8u);
 
                 int bestDir = -1;
                 float bestFood = -1.f;
@@ -349,7 +348,11 @@ int main(int argc, char** argv) {
         if (std::string(argv[i]) == "--smoke") smokeTest = true;
     }
 
+#if defined(SFML_VERSION_MAJOR) && (SFML_VERSION_MAJOR >= 3)
     sf::RenderWindow window(sf::VideoMode(sf::Vector2u{kWindowWidth, kWindowHeight}), "Game of Life");
+#else
+    sf::RenderWindow window(sf::VideoMode(kWindowWidth, kWindowHeight), "Game of Life");
+#endif
     window.setFramerateLimit(60);
 
     sf::Font font;
@@ -361,7 +364,12 @@ int main(int argc, char** argv) {
     Simulation sim{kGridWidth, kGridHeight};
     sim.reset();
 
+#if defined(SFML_VERSION_MAJOR) && (SFML_VERSION_MAJOR >= 3)
     sf::Texture gridTexture(sf::Vector2u{kGridWidth, kGridHeight});
+#else
+    sf::Texture gridTexture;
+    gridTexture.create(kGridWidth, kGridHeight);
+#endif
     sf::Sprite gridSprite(gridTexture);
     gridSprite.setScale(sf::Vector2f{static_cast<float>(kCellSize), static_cast<float>(kCellSize)});
 
@@ -406,6 +414,9 @@ int main(int argc, char** argv) {
     centerLabel();
 
     bool paused = false;
+    bool showNutrients = true;
+    bool showTrails = true;
+
     float accumulator = 0.f;
     sf::Clock clock;
 
@@ -433,7 +444,16 @@ int main(int argc, char** argv) {
 
                 if (state == State::Simulation) {
                     if (key->code == sf::Keyboard::Key::Space) paused = !paused;
-                    if (key->code == sf::Keyboard::Key::R) sim.reset();
+                    if (key->code == sf::Keyboard::Key::R) {
+                        sim.reset();
+                        std::fill(trail.begin(), trail.end(), 0.f);
+                    }
+                    if (key->code == sf::Keyboard::Key::C) {
+                        sim.clear();
+                        std::fill(trail.begin(), trail.end(), 0.f);
+                    }
+                    if (key->code == sf::Keyboard::Key::N) showNutrients = !showNutrients;
+                    if (key->code == sf::Keyboard::Key::T) showTrails = !showTrails;
                 }
             }
 
@@ -476,7 +496,16 @@ int main(int argc, char** argv) {
 
                 if (state == State::Simulation) {
                     if (event.key.code == sf::Keyboard::Space) paused = !paused;
-                    if (event.key.code == sf::Keyboard::R) sim.reset();
+                    if (event.key.code == sf::Keyboard::R) {
+                        sim.reset();
+                        std::fill(trail.begin(), trail.end(), 0.f);
+                    }
+                    if (event.key.code == sf::Keyboard::C) {
+                        sim.clear();
+                        std::fill(trail.begin(), trail.end(), 0.f);
+                    }
+                    if (event.key.code == sf::Keyboard::N) showNutrients = !showNutrients;
+                    if (event.key.code == sf::Keyboard::T) showTrails = !showTrails;
                 }
             }
 
@@ -554,7 +583,7 @@ int main(int argc, char** argv) {
                     const unsigned i = x + y * kGridWidth;
 
                     const float n = sim.nutrient[i] / kMaxNutrient;
-                    const float bg = clamp01(n);
+                    const float bg = showNutrients ? clamp01(n) : 0.f;
 
                     const float baseR = 0.02f + 0.08f * bg;
                     const float baseG = 0.02f + 0.10f * bg;
@@ -564,7 +593,11 @@ int main(int argc, char** argv) {
                     float g = baseG;
                     float b = baseB;
 
-                    trail[i] *= kTrailDecay;
+                    if (showTrails) {
+                        trail[i] *= kTrailDecay;
+                    } else {
+                        trail[i] = 0.f;
+                    }
 
                     if (sim.alive[i]) {
                         const float e = clamp01(sim.energy[i] / 2.2f);
@@ -572,9 +605,13 @@ int main(int argc, char** argv) {
 
                         const sf::Color c = lerp(young, old, a);
                         const float bright = 0.35f + 0.65f * e;
-                        trail[i] = std::max(trail[i], bright);
 
-                        const float t = trail[i];
+                        float t = bright;
+                        if (showTrails) {
+                            trail[i] = std::max(trail[i], bright);
+                            t = trail[i];
+                        }
+
                         r = std::min(1.f, r + (c.r / 255.f) * t);
                         g = std::min(1.f, g + (c.g / 255.f) * t);
                         b = std::min(1.f, b + (c.b / 255.f) * t);
@@ -588,14 +625,21 @@ int main(int argc, char** argv) {
                 }
             }
 
+#if defined(SFML_VERSION_MAJOR) && (SFML_VERSION_MAJOR >= 3)
             gridTexture.update(pixels.data());
+#else
+            gridTexture.update(reinterpret_cast<const sf::Uint8*>(pixels.data()));
+#endif
             window.draw(gridSprite);
 
             if (hasFont) {
                 std::ostringstream oss;
                 oss << "Alive: " << sim.aliveCount << "    "
                     << "Speed: " << static_cast<int>(kTickHz) << " tps    "
-                    << "[Space] pause  [R] reset  LMB seed  RMB nutrients  [Esc] menu";
+                    << "[Space] pause  [R] reset  [C] clear  LMB seed  RMB nutrients  "
+                    << "[N] nutrients:" << (showNutrients ? "on" : "off") << "  "
+                    << "[T] trails:" << (showTrails ? "on" : "off") << "  "
+                    << "[Esc] menu";
                 if (paused) oss << "    (PAUSED)";
 
                 hud.setString(oss.str());

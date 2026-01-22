@@ -1,11 +1,14 @@
-﻿# Game of Life
+# Game of Life
 
 An SFML toy that combines a Game-of-Life-style neighborhood rule with an energy + nutrient field (diffusion + regrowth), so patterns grow, compete, collapse, and migrate.
 
 ## Controls
 - Click `START` to begin
 - `Space`: pause/resume
-- `R`: reset
+- `R`: reset (new nutrient field + seed)
+- `C`: clear all life (keep nutrients)
+- `N`: toggle nutrient background
+- `T`: toggle trails
 - Left click: place a small life seed
 - Right click: add a nutrient patch
 - `Esc`: back to menu
