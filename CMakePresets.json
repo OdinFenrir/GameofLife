@@ -1,0 +1,27 @@
+﻿{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "msvc-release",
+      "displayName": "MSVC Release",
+      "generator": "Visual Studio 18 2026",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_TOOLCHAIN_FILE": "C:/vcpkg/scripts/buildsystems/vcpkg.cmake",
+        "CMAKE_CONFIGURATION_TYPES": "Release;Debug"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "release",
+      "configurePreset": "msvc-release",
+      "configuration": "Release"
+    },
+    {
+      "name": "debug",
+      "configurePreset": "msvc-release",
+      "configuration": "Debug"
+    }
+  ]
+}
