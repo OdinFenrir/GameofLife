@@ -10,4 +10,4 @@ cmake --preset msvc-release
 cmake --build --preset release
 
 ## Run
-.\build\Release\antfarm.exe
+.\build\Release\gameoflife.exe

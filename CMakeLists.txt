@@ -1,20 +1,26 @@
 ﻿cmake_minimum_required(VERSION 3.20)
-project(AntFarm LANGUAGES CXX)
+project(GameOfLife LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-add_executable(antfarm
+add_executable(gameoflife
     src/main.cpp
 )
 
-target_include_directories(antfarm PRIVATE include)
+target_include_directories(gameoflife PRIVATE include)
 
 find_package(SFML COMPONENTS System Window Graphics CONFIG REQUIRED)
-target_link_libraries(antfarm PRIVATE SFML::System SFML::Window SFML::Graphics)
+target_link_libraries(gameoflife PRIVATE SFML::System SFML::Window SFML::Graphics)
+
+add_custom_command(TARGET gameoflife POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${CMAKE_SOURCE_DIR}/assets
+            $<TARGET_FILE_DIR:gameoflife>/assets
+)
 
 add_custom_target(run
-    COMMAND antfarm
-    DEPENDS antfarm
-    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    COMMAND $<TARGET_FILE:gameoflife>
+    DEPENDS gameoflife
+    WORKING_DIRECTORY $<TARGET_FILE_DIR:gameoflife>
 )
