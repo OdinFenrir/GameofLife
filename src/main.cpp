@@ -25,16 +25,25 @@ constexpr float kMaxNutrient = 3.0f;
 constexpr float kDiffusion = 0.22f;     // 0..1; higher = smoother nutrient field
 constexpr float kRegrowRate = 0.0025f;  // fraction toward max per tick
 
-constexpr float kHarvestFrac = 0.09f;  // fraction of local nutrient harvested per tick
-constexpr float kUpkeep = 0.030f;      // energy cost per tick
-
-constexpr float kBirthThreshold = 1.80f;
 constexpr float kBirthNutrientMin = 1.10f;
 constexpr float kInitialEnergy = 0.55f;
-constexpr std::uint16_t kMaxAge = 1400;
-constexpr float kCorpseValue = 0.75f;
 
 constexpr float kTrailDecay = 0.92f;
+
+constexpr float kMutationChance = 0.015f; // ~1.5% flip species on birth
+
+struct SpeciesParams {
+    float harvestFrac{};
+    float upkeep{};
+    float birthThreshold{};
+    std::uint16_t maxAge{};
+    float corpseValue{};
+};
+
+constexpr std::array<SpeciesParams, 2> kSpecies{
+    SpeciesParams{0.095f, 0.033f, 1.70f, static_cast<std::uint16_t>(1100), 0.70f},
+    SpeciesParams{0.070f, 0.026f, 2.05f, static_cast<std::uint16_t>(1700), 0.90f},
+};
 
 unsigned wrap(int v, unsigned max) {
     const int m = static_cast<int>(max);
@@ -73,6 +82,9 @@ struct Simulation {
     std::vector<std::uint8_t> alive;
     std::vector<std::uint8_t> nextAlive;
 
+    std::vector<std::uint8_t> species;
+    std::vector<std::uint8_t> nextSpecies;
+
     std::vector<float> energy;
     std::vector<float> nextEnergy;
 
@@ -88,14 +100,17 @@ struct Simulation {
     std::vector<unsigned> yD;
 
     std::mt19937 rng{std::random_device{}()};
+    std::uniform_real_distribution<float> dist01{0.f, 1.f};
 
-    std::size_t aliveCount{};
+    std::array<std::size_t, 2> aliveBySpecies{};
 
     explicit Simulation(unsigned w, unsigned h)
         : width(w)
         , height(h)
         , alive(w * h, 0)
         , nextAlive(w * h, 0)
+        , species(w * h, 0)
+        , nextSpecies(w * h, 0)
         , energy(w * h, 0.f)
         , nextEnergy(w * h, 0.f)
         , age(w * h, 0)
@@ -130,11 +145,35 @@ struct Simulation {
                alive[idx(xl, yd)] + alive[idx(x, yd)] + alive[idx(xr, yd)];
     }
 
+    std::array<int, 2> neighborSpeciesCounts(unsigned x, unsigned y) const {
+        const unsigned xl = xL[x];
+        const unsigned xr = xR[x];
+        const unsigned yu = yU[y];
+        const unsigned yd = yD[y];
+
+        std::array<unsigned, 8> ns{
+            idx(xl, yu), idx(x, yu), idx(xr, yu), idx(xl, y), idx(xr, y), idx(xl, yd), idx(x, yd), idx(xr, yd),
+        };
+
+        std::array<int, 2> counts{0, 0};
+        for (unsigned ni : ns) {
+            if (!alive[ni]) continue;
+            counts[species[ni] ? 1 : 0] += 1;
+        }
+        return counts;
+    }
+
+    std::uint8_t mutateIfNeeded(std::uint8_t s) {
+        if (dist01(rng) < kMutationChance) return static_cast<std::uint8_t>(s ^ 1u);
+        return s;
+    }
+
     void clear() {
         std::fill(alive.begin(), alive.end(), 0);
+        std::fill(species.begin(), species.end(), 0);
         std::fill(energy.begin(), energy.end(), 0.f);
         std::fill(age.begin(), age.end(), 0);
-        aliveCount = 0;
+        aliveBySpecies = {0, 0};
     }
 
     void reset() {
@@ -169,10 +208,10 @@ struct Simulation {
 
         for (auto& n : nutrient) n = std::clamp(n, 0.f, kMaxNutrient);
 
-        seedCross(width / 2, height / 2);
+        seedCross(width / 2, height / 2, 0);
     }
 
-    void seedCross(unsigned x, unsigned y) {
+    void seedCross(unsigned x, unsigned y, std::uint8_t s) {
         const std::array<std::pair<int, int>, 5> offsets{
             {{0, 0}, {-1, 0}, {1, 0}, {0, -1}, {0, 1}},
         };
@@ -183,9 +222,10 @@ struct Simulation {
             const unsigned i = idx(xx, yy);
             if (alive[i]) continue;
             alive[i] = 1;
+            species[i] = s;
             energy[i] = kInitialEnergy;
             age[i] = 0;
-            ++aliveCount;
+            ++aliveBySpecies[s ? 1 : 0];
         }
     }
 
@@ -227,10 +267,11 @@ struct Simulation {
         }
 
         std::fill(nextAlive.begin(), nextAlive.end(), 0);
+        std::fill(nextSpecies.begin(), nextSpecies.end(), 0);
         std::fill(nextEnergy.begin(), nextEnergy.end(), 0.f);
         std::fill(nextAge.begin(), nextAge.end(), 0);
 
-        aliveCount = 0;
+        aliveBySpecies = {0, 0};
 
         // Survivors + energy-driven reproduction
         for (unsigned y = 0; y < height; ++y) {
@@ -238,30 +279,34 @@ struct Simulation {
                 const unsigned i = idx(x, y);
                 if (!alive[i]) continue;
 
+                const std::uint8_t s = species[i] ? 1u : 0u;
+                const auto& sp = kSpecies[s];
+
                 const int neighbors = countNeighbors(x, y);
 
                 float localN = nextNutrient[i];
-                const float harvested = kHarvestFrac * localN;
+                const float harvested = sp.harvestFrac * localN;
                 localN -= harvested;
                 nextNutrient[i] = localN;
 
-                const float e = energy[i] + harvested - kUpkeep;
+                const float e = energy[i] + harvested - sp.upkeep;
                 const std::uint16_t a = static_cast<std::uint16_t>(age[i] + 1);
 
                 const bool crowdedOut = (neighbors < 2) || (neighbors > 4);
-                const bool died = (e <= 0.f) || (a > kMaxAge) || crowdedOut;
+                const bool died = (e <= 0.f) || (a > sp.maxAge) || crowdedOut;
 
                 if (died) {
-                    nextNutrient[i] = std::clamp(nextNutrient[i] + kCorpseValue, 0.f, kMaxNutrient);
+                    nextNutrient[i] = std::clamp(nextNutrient[i] + sp.corpseValue, 0.f, kMaxNutrient);
                     continue;
                 }
 
                 nextAlive[i] = 1;
+                nextSpecies[i] = s;
                 nextEnergy[i] = e;
                 nextAge[i] = a;
-                ++aliveCount;
+                ++aliveBySpecies[s];
 
-                if (e < kBirthThreshold) continue;
+                if (e < sp.birthThreshold) continue;
                 if (neighbors < 2 || neighbors > 3) continue;
 
                 // Pick an empty neighbor, preferring higher nutrient.
@@ -303,9 +348,10 @@ struct Simulation {
                 nextEnergy[i] -= childEnergy;
 
                 nextAlive[ni] = 1;
+                nextSpecies[ni] = mutateIfNeeded(s);
                 nextEnergy[ni] = childEnergy;
                 nextAge[ni] = 0;
-                ++aliveCount;
+                ++aliveBySpecies[nextSpecies[ni] ? 1 : 0];
             }
         }
 
@@ -326,14 +372,22 @@ struct Simulation {
                 localN -= spent;
                 nextNutrient[i] = localN;
 
+                const auto counts = neighborSpeciesCounts(x, y);
+                std::uint8_t s = 0;
+                if (counts[1] > counts[0]) s = 1;
+                else if (counts[1] == counts[0] && (rng() & 1u)) s = 1;
+                s = mutateIfNeeded(s);
+
                 nextAlive[i] = 1;
+                nextSpecies[i] = s;
                 nextEnergy[i] = kInitialEnergy + 0.40f * spent;
                 nextAge[i] = 0;
-                ++aliveCount;
+                ++aliveBySpecies[s];
             }
         }
 
         alive.swap(nextAlive);
+        species.swap(nextSpecies);
         energy.swap(nextEnergy);
         age.swap(nextAge);
         nutrient.swap(nextNutrient);
@@ -359,7 +413,7 @@ int main(int argc, char** argv) {
     const bool hasFont = loadFont(font);
 
     enum class State { Menu, Simulation };
-    State state = State::Menu;
+    State state = smokeTest ? State::Simulation : State::Menu;
 
     Simulation sim{kGridWidth, kGridHeight};
     sim.reset();
@@ -469,7 +523,9 @@ int main(int argc, char** argv) {
                     const int cellY = mousePress->position.y / static_cast<int>(kCellSize);
                     if (cellX >= 0 && cellY >= 0 && cellX < static_cast<int>(kGridWidth) && cellY < static_cast<int>(kGridHeight)) {
                         if (mousePress->button == sf::Mouse::Button::Left) {
-                            sim.seedCross(static_cast<unsigned>(cellX), static_cast<unsigned>(cellY));
+                            const bool shift = sf::Keyboard::isKeyPressed(sf::Keyboard::Key::LShift) ||
+                                               sf::Keyboard::isKeyPressed(sf::Keyboard::Key::RShift);
+                            sim.seedCross(static_cast<unsigned>(cellX), static_cast<unsigned>(cellY), shift ? 1u : 0u);
                         } else if (mousePress->button == sf::Mouse::Button::Right) {
                             sim.addNutrientPatch(static_cast<unsigned>(cellX), static_cast<unsigned>(cellY), 1.8f, 12);
                         }
@@ -522,7 +578,9 @@ int main(int argc, char** argv) {
                     const int cellY = event.mouseButton.y / static_cast<int>(kCellSize);
                     if (cellX >= 0 && cellY >= 0 && cellX < static_cast<int>(kGridWidth) && cellY < static_cast<int>(kGridHeight)) {
                         if (event.mouseButton.button == sf::Mouse::Left) {
-                            sim.seedCross(static_cast<unsigned>(cellX), static_cast<unsigned>(cellY));
+                            const bool shift = sf::Keyboard::isKeyPressed(sf::Keyboard::LShift) ||
+                                               sf::Keyboard::isKeyPressed(sf::Keyboard::RShift);
+                            sim.seedCross(static_cast<unsigned>(cellX), static_cast<unsigned>(cellY), shift ? 1u : 0u);
                         } else if (event.mouseButton.button == sf::Mouse::Right) {
                             sim.addNutrientPatch(static_cast<unsigned>(cellX), static_cast<unsigned>(cellY), 1.8f, 12);
                         }
@@ -575,8 +633,10 @@ int main(int argc, char** argv) {
             if (hasFont) window.draw(startLabel);
         } else {
             // Build pixels (nutrient background + energy/age colored cells + trails)
-            const sf::Color young{0u, 255u, 190u, 255u};
-            const sf::Color old{255u, 90u, 230u, 255u};
+            const sf::Color s0Young{0u, 255u, 190u, 255u};
+            const sf::Color s0Old{255u, 90u, 230u, 255u};
+            const sf::Color s1Young{255u, 220u, 80u, 255u};
+            const sf::Color s1Old{80u, 160u, 255u, 255u};
 
             for (unsigned y = 0; y < kGridHeight; ++y) {
                 for (unsigned x = 0; x < kGridWidth; ++x) {
@@ -600,11 +660,15 @@ int main(int argc, char** argv) {
                     }
 
                     if (sim.alive[i]) {
-                        const float e = clamp01(sim.energy[i] / 2.2f);
-                        const float a = clamp01(static_cast<float>(sim.age[i]) / static_cast<float>(kMaxAge));
+                        const std::uint8_t s = sim.species[i] ? 1u : 0u;
+                        const float e = clamp01(sim.energy[i] / 2.4f);
+                        const float a = clamp01(static_cast<float>(sim.age[i]) / static_cast<float>(kSpecies[s].maxAge));
 
+                        const sf::Color young = (s == 0) ? s0Young : s1Young;
+                        const sf::Color old = (s == 0) ? s0Old : s1Old;
                         const sf::Color c = lerp(young, old, a);
-                        const float bright = 0.35f + 0.65f * e;
+
+                        const float bright = 0.30f + 0.70f * e;
 
                         float t = bright;
                         if (showTrails) {
@@ -634,9 +698,9 @@ int main(int argc, char** argv) {
 
             if (hasFont) {
                 std::ostringstream oss;
-                oss << "Alive: " << sim.aliveCount << "    "
+                oss << "S0: " << sim.aliveBySpecies[0] << "   S1: " << sim.aliveBySpecies[1] << "    "
                     << "Speed: " << static_cast<int>(kTickHz) << " tps    "
-                    << "[Space] pause  [R] reset  [C] clear  LMB seed  RMB nutrients  "
+                    << "[Space] pause  [R] reset  [C] clear  LMB seed  Shift+LMB seed S1  RMB nutrients  "
                     << "[N] nutrients:" << (showNutrients ? "on" : "off") << "  "
                     << "[T] trails:" << (showTrails ? "on" : "off") << "  "
                     << "[Esc] menu";
@@ -654,7 +718,7 @@ int main(int argc, char** argv) {
 
         if (smokeTest) {
             static int frames = 0;
-            if (++frames > 120) window.close();
+            if (++frames > 180) window.close();
         }
     }
 
