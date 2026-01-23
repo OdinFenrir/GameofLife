@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <iomanip>
 #include <random>
 #include <sstream>
 #include <string>
@@ -14,7 +15,9 @@ namespace {
 constexpr unsigned kWindowWidth = 2560;
 constexpr unsigned kWindowHeight = 1440;
 
-constexpr unsigned kCellSize = 4;
+// Smaller cell size => finer grid (more cells, smaller squares).
+// 2 => 1280x720 cells at 2560x1440.
+constexpr unsigned kCellSize = 2;
 constexpr unsigned kGridWidth = kWindowWidth / kCellSize;
 constexpr unsigned kGridHeight = kWindowHeight / kCellSize;
 
@@ -30,7 +33,21 @@ constexpr float kInitialEnergy = 0.55f;
 
 constexpr float kTrailDecay = 0.92f;
 
-constexpr float kMutationChance = 0.015f; // ~1.5% flip species on birth
+// “Food seeking” movement (chemotaxis-like)
+constexpr float kMoveEnergyThreshold = 0.28f;
+constexpr float kMoveNutrientThreshold = 0.85f;
+constexpr float kMoveRequireDelta = 0.18f;
+constexpr float kMoveCost = 0.02f;
+
+// Evolution (heritable traits + selection)
+constexpr float kTraitMutationChance = 0.06f;       // per-trait chance
+constexpr float kMutationSigmaHarvest = 0.06f;      // multiplier noise
+constexpr float kMutationSigmaUpkeep = 0.05f;       // multiplier noise
+constexpr float kMutationSigmaBirth = 0.06f;        // multiplier noise
+constexpr float kMutationSigmaCorpse = 0.06f;       // multiplier noise
+constexpr float kMutationSigmaAge = 0.05f;          // multiplier noise
+constexpr float kRuleMutationChance = 0.015f;       // tweak neighbor-rule genes
+constexpr float kSpeciesFlipChance = 0.0015f;        // rare “speciation” flip on birth
 
 struct SpeciesParams {
     float harvestFrac{};
@@ -44,6 +61,12 @@ constexpr std::array<SpeciesParams, 2> kSpecies{
     SpeciesParams{0.095f, 0.033f, 1.70f, static_cast<std::uint16_t>(1100), 0.70f},
     SpeciesParams{0.070f, 0.026f, 2.05f, static_cast<std::uint16_t>(1700), 0.90f},
 };
+
+static constexpr std::array<std::pair<int, int>, 8> kDirs{{
+    {-1, -1}, {0, -1}, {1, -1},
+    {-1, 0},           {1, 0},
+    {-1, 1},  {0, 1},  {1, 1},
+}};
 
 unsigned wrap(int v, unsigned max) {
     const int m = static_cast<int>(max);
@@ -65,13 +88,8 @@ float clamp01(float v) {
 }
 
 bool loadFont(sf::Font& font) {
-#if defined(SFML_VERSION_MAJOR) && (SFML_VERSION_MAJOR >= 3)
     if (font.openFromFile("assets/DejaVuSans.ttf")) return true;
     if (font.openFromFile("assets/arial.ttf")) return true;
-#else
-    if (font.loadFromFile("assets/DejaVuSans.ttf")) return true;
-    if (font.loadFromFile("assets/arial.ttf")) return true;
-#endif
     return false;
 }
 
@@ -84,6 +102,35 @@ struct Simulation {
 
     std::vector<std::uint8_t> species;
     std::vector<std::uint8_t> nextSpecies;
+
+    // Heritable “genes” (multipliers over base species params)
+    std::vector<float> harvestMul;
+    std::vector<float> nextHarvestMul;
+
+    std::vector<float> upkeepMul;
+    std::vector<float> nextUpkeepMul;
+
+    std::vector<float> birthMul;
+    std::vector<float> nextBirthMul;
+
+    std::vector<float> corpseMul;
+    std::vector<float> nextCorpseMul;
+
+    std::vector<float> ageMul;
+    std::vector<float> nextAgeMul;
+
+    // Heritable neighborhood-rule “genes”
+    std::vector<std::uint8_t> surviveMinGene;
+    std::vector<std::uint8_t> nextSurviveMinGene;
+
+    std::vector<std::uint8_t> surviveMaxGene;
+    std::vector<std::uint8_t> nextSurviveMaxGene;
+
+    std::vector<std::uint8_t> reproduceMinGene;
+    std::vector<std::uint8_t> nextReproduceMinGene;
+
+    std::vector<std::uint8_t> reproduceMaxGene;
+    std::vector<std::uint8_t> nextReproduceMaxGene;
 
     std::vector<float> energy;
     std::vector<float> nextEnergy;
@@ -101,8 +148,13 @@ struct Simulation {
 
     std::mt19937 rng{std::random_device{}()};
     std::uniform_real_distribution<float> dist01{0.f, 1.f};
+    std::normal_distribution<float> distN{0.f, 1.f};
 
     std::array<std::size_t, 2> aliveBySpecies{};
+    std::array<float, 2> harvestMulSum{};
+    std::array<float, 2> upkeepMulSum{};
+    std::array<float, 2> birthMulSum{};
+    std::array<float, 2> ageMulSum{};
 
     explicit Simulation(unsigned w, unsigned h)
         : width(w)
@@ -111,6 +163,24 @@ struct Simulation {
         , nextAlive(w * h, 0)
         , species(w * h, 0)
         , nextSpecies(w * h, 0)
+        , harvestMul(w * h, 1.f)
+        , nextHarvestMul(w * h, 1.f)
+        , upkeepMul(w * h, 1.f)
+        , nextUpkeepMul(w * h, 1.f)
+        , birthMul(w * h, 1.f)
+        , nextBirthMul(w * h, 1.f)
+        , corpseMul(w * h, 1.f)
+        , nextCorpseMul(w * h, 1.f)
+        , ageMul(w * h, 1.f)
+        , nextAgeMul(w * h, 1.f)
+        , surviveMinGene(w * h, 2)
+        , nextSurviveMinGene(w * h, 2)
+        , surviveMaxGene(w * h, 4)
+        , nextSurviveMaxGene(w * h, 4)
+        , reproduceMinGene(w * h, 2)
+        , nextReproduceMinGene(w * h, 2)
+        , reproduceMaxGene(w * h, 3)
+        , nextReproduceMaxGene(w * h, 3)
         , energy(w * h, 0.f)
         , nextEnergy(w * h, 0.f)
         , age(w * h, 0)
@@ -163,17 +233,133 @@ struct Simulation {
         return counts;
     }
 
-    std::uint8_t mutateIfNeeded(std::uint8_t s) {
-        if (dist01(rng) < kMutationChance) return static_cast<std::uint8_t>(s ^ 1u);
+    unsigned pickAliveNeighborForSpecies(unsigned x, unsigned y, std::uint8_t desiredSpecies) {
+        const unsigned xl = xL[x];
+        const unsigned xr = xR[x];
+        const unsigned yu = yU[y];
+        const unsigned yd = yD[y];
+
+        std::array<unsigned, 8> ns{
+            idx(xl, yu), idx(x, yu), idx(xr, yu), idx(xl, y), idx(xr, y), idx(xl, yd), idx(x, yd), idx(xr, yd),
+        };
+
+        std::array<unsigned, 8> preferred{};
+        int preferredCount = 0;
+        std::array<unsigned, 8> any{};
+        int anyCount = 0;
+
+        desiredSpecies = static_cast<std::uint8_t>(desiredSpecies ? 1u : 0u);
+
+        for (unsigned ni : ns) {
+            if (!alive[ni]) continue;
+            any[static_cast<std::size_t>(anyCount++)] = ni;
+            if ((species[ni] ? 1u : 0u) == desiredSpecies) {
+                preferred[static_cast<std::size_t>(preferredCount++)] = ni;
+            }
+        }
+
+        if (preferredCount > 0) {
+            return preferred[static_cast<std::size_t>(rng() % static_cast<unsigned>(preferredCount))];
+        }
+        return any[static_cast<std::size_t>(rng() % static_cast<unsigned>(anyCount))];
+    }
+
+    float mutateMul(float v, float sigma, float lo, float hi) {
+        if (dist01(rng) < kTraitMutationChance) {
+            v *= std::max(0.2f, 1.f + distN(rng) * sigma);
+        }
+        return std::clamp(v, lo, hi);
+    }
+
+    std::uint8_t mutateRule(std::uint8_t v, int lo, int hi) {
+        if (dist01(rng) < kRuleMutationChance) {
+            const int sign = (rng() & 1u) ? 1 : -1;
+            v = static_cast<std::uint8_t>(std::clamp<int>(static_cast<int>(v) + sign, lo, hi));
+        }
+        return v;
+    }
+
+    std::uint8_t maybeFlipSpecies(std::uint8_t s) {
+        if (dist01(rng) < kSpeciesFlipChance) return static_cast<std::uint8_t>(s ^ 1u);
         return s;
+    }
+
+    void initGenes(unsigned i) {
+        harvestMul[i] = 1.f;
+        upkeepMul[i] = 1.f;
+        birthMul[i] = 1.f;
+        corpseMul[i] = 1.f;
+        ageMul[i] = 1.f;
+        surviveMinGene[i] = 2;
+        surviveMaxGene[i] = 4;
+        reproduceMinGene[i] = 2;
+        reproduceMaxGene[i] = 3;
+    }
+
+    void writeNextGenesFrom(unsigned from, unsigned to, bool mutate) {
+        float hm = harvestMul[from];
+        float um = upkeepMul[from];
+        float bm = birthMul[from];
+        float cm = corpseMul[from];
+        float am = ageMul[from];
+
+        std::uint8_t sMin = surviveMinGene[from];
+        std::uint8_t sMax = surviveMaxGene[from];
+        std::uint8_t rMin = reproduceMinGene[from];
+        std::uint8_t rMax = reproduceMaxGene[from];
+
+        if (mutate) {
+            hm = mutateMul(hm, kMutationSigmaHarvest, 0.60f, 1.60f);
+            um = mutateMul(um, kMutationSigmaUpkeep, 0.60f, 1.60f);
+            bm = mutateMul(bm, kMutationSigmaBirth, 0.60f, 1.80f);
+            cm = mutateMul(cm, kMutationSigmaCorpse, 0.60f, 1.80f);
+            am = mutateMul(am, kMutationSigmaAge, 0.70f, 1.70f);
+
+            sMin = mutateRule(sMin, 1, 3);
+            sMax = mutateRule(sMax, 3, 5);
+            if (sMin >= sMax) sMin = static_cast<std::uint8_t>(sMax - 1);
+
+            rMin = mutateRule(rMin, 2, 3);
+            rMax = mutateRule(rMax, 3, 4);
+            if (rMin > rMax) rMin = rMax;
+        }
+
+        nextHarvestMul[to] = hm;
+        nextUpkeepMul[to] = um;
+        nextBirthMul[to] = bm;
+        nextCorpseMul[to] = cm;
+        nextAgeMul[to] = am;
+        nextSurviveMinGene[to] = sMin;
+        nextSurviveMaxGene[to] = sMax;
+        nextReproduceMinGene[to] = rMin;
+        nextReproduceMaxGene[to] = rMax;
+
+        const std::uint8_t s = nextSpecies[to] ? 1u : 0u;
+        harvestMulSum[s] += hm;
+        upkeepMulSum[s] += um;
+        birthMulSum[s] += bm;
+        ageMulSum[s] += am;
     }
 
     void clear() {
         std::fill(alive.begin(), alive.end(), 0);
         std::fill(species.begin(), species.end(), 0);
+        std::fill(harvestMul.begin(), harvestMul.end(), 1.f);
+        std::fill(upkeepMul.begin(), upkeepMul.end(), 1.f);
+        std::fill(birthMul.begin(), birthMul.end(), 1.f);
+        std::fill(corpseMul.begin(), corpseMul.end(), 1.f);
+        std::fill(ageMul.begin(), ageMul.end(), 1.f);
+        std::fill(surviveMinGene.begin(), surviveMinGene.end(), 2);
+        std::fill(surviveMaxGene.begin(), surviveMaxGene.end(), 4);
+        std::fill(reproduceMinGene.begin(), reproduceMinGene.end(), 2);
+        std::fill(reproduceMaxGene.begin(), reproduceMaxGene.end(), 3);
         std::fill(energy.begin(), energy.end(), 0.f);
         std::fill(age.begin(), age.end(), 0);
         aliveBySpecies = {0, 0};
+        harvestMulSum = {0.f, 0.f};
+        upkeepMulSum = {0.f, 0.f};
+        birthMulSum = {0.f, 0.f};
+        ageMulSum = {0.f, 0.f};
     }
 
     void reset() {
@@ -223,6 +409,7 @@ struct Simulation {
             if (alive[i]) continue;
             alive[i] = 1;
             species[i] = s;
+            initGenes(i);
             energy[i] = kInitialEnergy;
             age[i] = 0;
             ++aliveBySpecies[s ? 1 : 0];
@@ -246,7 +433,7 @@ struct Simulation {
         }
     }
 
-    void step() {
+    void step(bool enableMovement) {
         // Nutrient diffusion + regrowth
         for (unsigned y = 0; y < height; ++y) {
             const unsigned yu = yU[y];
@@ -271,7 +458,21 @@ struct Simulation {
         std::fill(nextEnergy.begin(), nextEnergy.end(), 0.f);
         std::fill(nextAge.begin(), nextAge.end(), 0);
 
+        std::fill(nextHarvestMul.begin(), nextHarvestMul.end(), 1.f);
+        std::fill(nextUpkeepMul.begin(), nextUpkeepMul.end(), 1.f);
+        std::fill(nextBirthMul.begin(), nextBirthMul.end(), 1.f);
+        std::fill(nextCorpseMul.begin(), nextCorpseMul.end(), 1.f);
+        std::fill(nextAgeMul.begin(), nextAgeMul.end(), 1.f);
+        std::fill(nextSurviveMinGene.begin(), nextSurviveMinGene.end(), 2);
+        std::fill(nextSurviveMaxGene.begin(), nextSurviveMaxGene.end(), 4);
+        std::fill(nextReproduceMinGene.begin(), nextReproduceMinGene.end(), 2);
+        std::fill(nextReproduceMaxGene.begin(), nextReproduceMaxGene.end(), 3);
+
         aliveBySpecies = {0, 0};
+        harvestMulSum = {0.f, 0.f};
+        upkeepMulSum = {0.f, 0.f};
+        birthMulSum = {0.f, 0.f};
+        ageMulSum = {0.f, 0.f};
 
         // Survivors + energy-driven reproduction
         for (unsigned y = 0; y < height; ++y) {
@@ -284,45 +485,76 @@ struct Simulation {
 
                 const int neighbors = countNeighbors(x, y);
 
+                const float effHarvest = sp.harvestFrac * harvestMul[i];
+                const float effUpkeep = sp.upkeep * upkeepMul[i];
+                const float effBirthThreshold = sp.birthThreshold * birthMul[i];
+                const float effCorpseValue = sp.corpseValue * corpseMul[i];
+                const auto effMaxAge = static_cast<std::uint16_t>(
+                    std::clamp(static_cast<int>(std::lround(static_cast<float>(sp.maxAge) * ageMul[i])), 650, 3200));
+
                 float localN = nextNutrient[i];
-                const float harvested = sp.harvestFrac * localN;
+                const float harvested = effHarvest * localN;
                 localN -= harvested;
                 nextNutrient[i] = localN;
 
-                const float e = energy[i] + harvested - sp.upkeep;
+                // Tradeoff: higher harvest has an implicit metabolic cost.
+                const float metabolicCost = effUpkeep + 0.32f * effHarvest;
+                float e = energy[i] + harvested - metabolicCost;
                 const std::uint16_t a = static_cast<std::uint16_t>(age[i] + 1);
 
-                const bool crowdedOut = (neighbors < 2) || (neighbors > 4);
-                const bool died = (e <= 0.f) || (a > sp.maxAge) || crowdedOut;
+                const bool crowdedOut = (neighbors < static_cast<int>(surviveMinGene[i])) || (neighbors > static_cast<int>(surviveMaxGene[i]));
+                const bool died = (e <= 0.f) || (a > effMaxAge) || crowdedOut;
 
                 if (died) {
-                    nextNutrient[i] = std::clamp(nextNutrient[i] + sp.corpseValue, 0.f, kMaxNutrient);
+                    nextNutrient[i] = std::clamp(nextNutrient[i] + effCorpseValue, 0.f, kMaxNutrient);
                     continue;
                 }
 
-                nextAlive[i] = 1;
-                nextSpecies[i] = s;
-                nextEnergy[i] = e;
-                nextAge[i] = a;
-                ++aliveBySpecies[s];
+                unsigned target = i;
 
-                if (e < sp.birthThreshold) continue;
-                if (neighbors < 2 || neighbors > 3) continue;
+                if (enableMovement && e < effBirthThreshold && e < kMoveEnergyThreshold && nextNutrient[i] < kMoveNutrientThreshold) {
+                    const int startMove = static_cast<int>(rng() % 8u);
+                    unsigned bestSpot = 0xFFFFFFFFu;
+                    float bestFood = -1.f;
+                    for (int k = 0; k < 8; ++k) {
+                        const auto [dx, dy] = kDirs[static_cast<std::size_t>((startMove + k) & 7)];
+                        const unsigned xx = wrap(static_cast<int>(x) + dx, width);
+                        const unsigned yy = wrap(static_cast<int>(y) + dy, height);
+                        const unsigned ni = idx(xx, yy);
+                        if (alive[ni]) continue;
+                        if (nextAlive[ni]) continue;
+                        const float food = nextNutrient[ni];
+                        if (food > bestFood) {
+                            bestFood = food;
+                            bestSpot = ni;
+                        }
+                    }
+                    if (bestSpot != 0xFFFFFFFFu && bestFood > nextNutrient[i] + kMoveRequireDelta) {
+                        e = std::max(0.f, e - kMoveCost);
+                        target = bestSpot;
+                    }
+                }
+
+                if (nextAlive[target]) target = i;
+
+                nextAlive[target] = 1;
+                nextSpecies[target] = s;
+                nextEnergy[target] = e;
+                nextAge[target] = a;
+                ++aliveBySpecies[s];
+                writeNextGenesFrom(i, target, false);
+
+                if (e < effBirthThreshold) continue;
+                if (neighbors < static_cast<int>(reproduceMinGene[i]) || neighbors > static_cast<int>(reproduceMaxGene[i])) continue;
 
                 // Pick an empty neighbor, preferring higher nutrient.
-                const std::array<std::pair<int, int>, 8> dirs{{
-                    {-1, -1}, {0, -1}, {1, -1},
-                    {-1, 0},           {1, 0},
-                    {-1, 1},  {0, 1},  {1, 1},
-                }};
-
                 const int start = static_cast<int>(rng() % 8u);
 
                 int bestDir = -1;
                 float bestFood = -1.f;
 
                 for (int k = 0; k < 8; ++k) {
-                    const auto [dx, dy] = dirs[static_cast<std::size_t>((start + k) & 7)];
+                    const auto [dx, dy] = kDirs[static_cast<std::size_t>((start + k) & 7)];
                     const unsigned xx = wrap(static_cast<int>(x) + dx, width);
                     const unsigned yy = wrap(static_cast<int>(y) + dy, height);
                     const unsigned ni = idx(xx, yy);
@@ -339,19 +571,20 @@ struct Simulation {
 
                 if (bestDir == -1) continue;
 
-                const auto [dx, dy] = dirs[static_cast<std::size_t>(bestDir)];
+                const auto [dx, dy] = kDirs[static_cast<std::size_t>(bestDir)];
                 const unsigned xx = wrap(static_cast<int>(x) + dx, width);
                 const unsigned yy = wrap(static_cast<int>(y) + dy, height);
                 const unsigned ni = idx(xx, yy);
 
-                const float childEnergy = nextEnergy[i] * 0.5f;
-                nextEnergy[i] -= childEnergy;
+                const float childEnergy = nextEnergy[target] * 0.5f;
+                nextEnergy[target] -= childEnergy;
 
                 nextAlive[ni] = 1;
-                nextSpecies[ni] = mutateIfNeeded(s);
+                nextSpecies[ni] = maybeFlipSpecies(s);
                 nextEnergy[ni] = childEnergy;
                 nextAge[ni] = 0;
                 ++aliveBySpecies[nextSpecies[ni] ? 1 : 0];
+                writeNextGenesFrom(i, ni, true);
             }
         }
 
@@ -376,13 +609,14 @@ struct Simulation {
                 std::uint8_t s = 0;
                 if (counts[1] > counts[0]) s = 1;
                 else if (counts[1] == counts[0] && (rng() & 1u)) s = 1;
-                s = mutateIfNeeded(s);
 
                 nextAlive[i] = 1;
-                nextSpecies[i] = s;
+                nextSpecies[i] = maybeFlipSpecies(s);
                 nextEnergy[i] = kInitialEnergy + 0.40f * spent;
                 nextAge[i] = 0;
-                ++aliveBySpecies[s];
+                ++aliveBySpecies[nextSpecies[i] ? 1 : 0];
+                const unsigned parent = pickAliveNeighborForSpecies(x, y, s);
+                writeNextGenesFrom(parent, i, true);
             }
         }
 
@@ -391,6 +625,16 @@ struct Simulation {
         energy.swap(nextEnergy);
         age.swap(nextAge);
         nutrient.swap(nextNutrient);
+
+        harvestMul.swap(nextHarvestMul);
+        upkeepMul.swap(nextUpkeepMul);
+        birthMul.swap(nextBirthMul);
+        corpseMul.swap(nextCorpseMul);
+        ageMul.swap(nextAgeMul);
+        surviveMinGene.swap(nextSurviveMinGene);
+        surviveMaxGene.swap(nextSurviveMaxGene);
+        reproduceMinGene.swap(nextReproduceMinGene);
+        reproduceMaxGene.swap(nextReproduceMaxGene);
     }
 };
 
@@ -402,11 +646,7 @@ int main(int argc, char** argv) {
         if (std::string(argv[i]) == "--smoke") smokeTest = true;
     }
 
-#if defined(SFML_VERSION_MAJOR) && (SFML_VERSION_MAJOR >= 3)
     sf::RenderWindow window(sf::VideoMode(sf::Vector2u{kWindowWidth, kWindowHeight}), "Game of Life");
-#else
-    sf::RenderWindow window(sf::VideoMode(kWindowWidth, kWindowHeight), "Game of Life");
-#endif
     window.setFramerateLimit(60);
 
     sf::Font font;
@@ -418,12 +658,7 @@ int main(int argc, char** argv) {
     Simulation sim{kGridWidth, kGridHeight};
     sim.reset();
 
-#if defined(SFML_VERSION_MAJOR) && (SFML_VERSION_MAJOR >= 3)
     sf::Texture gridTexture(sf::Vector2u{kGridWidth, kGridHeight});
-#else
-    sf::Texture gridTexture;
-    gridTexture.create(kGridWidth, kGridHeight);
-#endif
     sf::Sprite gridSprite(gridTexture);
     gridSprite.setScale(sf::Vector2f{static_cast<float>(kCellSize), static_cast<float>(kCellSize)});
 
@@ -439,17 +674,8 @@ int main(int argc, char** argv) {
     const sf::Color neonIdle{0u, 255u, 190u, 255u};
     const sf::Color neonHover{130u, 255u, 255u, 255u};
 
-#if defined(SFML_VERSION_MAJOR) && (SFML_VERSION_MAJOR >= 3)
     sf::Text startLabel(font);
     sf::Text hud(font);
-#else
-    sf::Text startLabel;
-    sf::Text hud;
-    if (hasFont) {
-        startLabel.setFont(font);
-        hud.setFont(font);
-    }
-#endif
 
     startLabel.setString("START");
     startLabel.setCharacterSize(58);
@@ -470,6 +696,7 @@ int main(int argc, char** argv) {
     bool paused = false;
     bool showNutrients = true;
     bool showTrails = true;
+    bool enableMovement = true;
 
     float accumulator = 0.f;
     sf::Clock clock;
@@ -480,7 +707,6 @@ int main(int argc, char** argv) {
         const float dt = clock.restart().asSeconds();
         accumulator += dt;
 
-#if defined(SFML_VERSION_MAJOR) && (SFML_VERSION_MAJOR >= 3)
         while (auto event = window.pollEvent()) {
             if (event->is<sf::Event::Closed>()) {
                 window.close();
@@ -508,6 +734,7 @@ int main(int argc, char** argv) {
                     }
                     if (key->code == sf::Keyboard::Key::N) showNutrients = !showNutrients;
                     if (key->code == sf::Keyboard::Key::T) showTrails = !showTrails;
+                    if (key->code == sf::Keyboard::Key::M) enableMovement = !enableMovement;
                 }
             }
 
@@ -522,10 +749,10 @@ int main(int argc, char** argv) {
                     const int cellX = mousePress->position.x / static_cast<int>(kCellSize);
                     const int cellY = mousePress->position.y / static_cast<int>(kCellSize);
                     if (cellX >= 0 && cellY >= 0 && cellX < static_cast<int>(kGridWidth) && cellY < static_cast<int>(kGridHeight)) {
-                        if (mousePress->button == sf::Mouse::Button::Left) {
-                            const bool shift = sf::Keyboard::isKeyPressed(sf::Keyboard::Key::LShift) ||
+                        const bool shiftDown = sf::Keyboard::isKeyPressed(sf::Keyboard::Key::LShift) ||
                                                sf::Keyboard::isKeyPressed(sf::Keyboard::Key::RShift);
-                            sim.seedCross(static_cast<unsigned>(cellX), static_cast<unsigned>(cellY), shift ? 1u : 0u);
+                        if (mousePress->button == sf::Mouse::Button::Left) {
+                            sim.seedCross(static_cast<unsigned>(cellX), static_cast<unsigned>(cellY), shiftDown ? 1u : 0u);
                         } else if (mousePress->button == sf::Mouse::Button::Right) {
                             sim.addNutrientPatch(static_cast<unsigned>(cellX), static_cast<unsigned>(cellY), 1.8f, 12);
                         }
@@ -533,68 +760,12 @@ int main(int argc, char** argv) {
                 }
             }
         }
-#else
-        sf::Event event;
-        while (window.pollEvent(event)) {
-            if (event.type == sf::Event::Closed) {
-                window.close();
-                continue;
-            }
-
-            if (event.type == sf::Event::KeyPressed) {
-                if (event.key.code == sf::Keyboard::Escape) {
-                    if (state == State::Simulation) {
-                        state = State::Menu;
-                    } else {
-                        window.close();
-                    }
-                }
-
-                if (state == State::Simulation) {
-                    if (event.key.code == sf::Keyboard::Space) paused = !paused;
-                    if (event.key.code == sf::Keyboard::R) {
-                        sim.reset();
-                        std::fill(trail.begin(), trail.end(), 0.f);
-                    }
-                    if (event.key.code == sf::Keyboard::C) {
-                        sim.clear();
-                        std::fill(trail.begin(), trail.end(), 0.f);
-                    }
-                    if (event.key.code == sf::Keyboard::N) showNutrients = !showNutrients;
-                    if (event.key.code == sf::Keyboard::T) showTrails = !showTrails;
-                }
-            }
-
-            if (event.type == sf::Event::MouseButtonPressed) {
-                const float mx = static_cast<float>(event.mouseButton.x);
-                const float my = static_cast<float>(event.mouseButton.y);
-
-                if (state == State::Menu) {
-                    if (button.getGlobalBounds().contains(mx, my)) {
-                        state = State::Simulation;
-                    }
-                } else {
-                    const int cellX = event.mouseButton.x / static_cast<int>(kCellSize);
-                    const int cellY = event.mouseButton.y / static_cast<int>(kCellSize);
-                    if (cellX >= 0 && cellY >= 0 && cellX < static_cast<int>(kGridWidth) && cellY < static_cast<int>(kGridHeight)) {
-                        if (event.mouseButton.button == sf::Mouse::Left) {
-                            const bool shift = sf::Keyboard::isKeyPressed(sf::Keyboard::LShift) ||
-                                               sf::Keyboard::isKeyPressed(sf::Keyboard::RShift);
-                            sim.seedCross(static_cast<unsigned>(cellX), static_cast<unsigned>(cellY), shift ? 1u : 0u);
-                        } else if (event.mouseButton.button == sf::Mouse::Right) {
-                            sim.addNutrientPatch(static_cast<unsigned>(cellX), static_cast<unsigned>(cellY), 1.8f, 12);
-                        }
-                    }
-                }
-            }
-        }
-#endif
 
         // Update
         if (state == State::Simulation && !paused) {
             int steps = 0;
             while (accumulator >= kTickDt && steps < maxStepsPerFrame) {
-                sim.step();
+                sim.step(enableMovement);
                 accumulator -= kTickDt;
                 ++steps;
             }
@@ -662,10 +833,16 @@ int main(int argc, char** argv) {
                     if (sim.alive[i]) {
                         const std::uint8_t s = sim.species[i] ? 1u : 0u;
                         const float e = clamp01(sim.energy[i] / 2.4f);
-                        const float a = clamp01(static_cast<float>(sim.age[i]) / static_cast<float>(kSpecies[s].maxAge));
+                        const float maxAgeEff = std::max(1.f, static_cast<float>(kSpecies[s].maxAge) * sim.ageMul[i]);
+                        const float a = clamp01(static_cast<float>(sim.age[i]) / maxAgeEff);
 
-                        const sf::Color young = (s == 0) ? s0Young : s1Young;
-                        const sf::Color old = (s == 0) ? s0Old : s1Old;
+                        const float effHarvest = kSpecies[s].harvestFrac * sim.harvestMul[i];
+                        const float effUpkeep = kSpecies[s].upkeep * sim.upkeepMul[i];
+                        const float ratio = effHarvest / std::max(0.001f, effUpkeep);
+                        const float tGene = clamp01((ratio - 1.6f) / 2.0f);
+
+                        const sf::Color young = lerp(s0Young, s1Young, tGene);
+                        const sf::Color old = lerp(s0Old, s1Old, tGene);
                         const sf::Color c = lerp(young, old, a);
 
                         const float bright = 0.30f + 0.70f * e;
@@ -689,27 +866,36 @@ int main(int argc, char** argv) {
                 }
             }
 
-#if defined(SFML_VERSION_MAJOR) && (SFML_VERSION_MAJOR >= 3)
             gridTexture.update(pixels.data());
-#else
-            gridTexture.update(reinterpret_cast<const sf::Uint8*>(pixels.data()));
-#endif
             window.draw(gridSprite);
 
             if (hasFont) {
-                std::ostringstream oss;
-                oss << "S0: " << sim.aliveBySpecies[0] << "   S1: " << sim.aliveBySpecies[1] << "    "
-                    << "Speed: " << static_cast<int>(kTickHz) << " tps    "
-                    << "[Space] pause  [R] reset  [C] clear  LMB seed  Shift+LMB seed S1  RMB nutrients  "
-                    << "[N] nutrients:" << (showNutrients ? "on" : "off") << "  "
-                    << "[T] trails:" << (showTrails ? "on" : "off") << "  "
-                    << "[Esc] menu";
-                if (paused) oss << "    (PAUSED)";
+                const float inv0 = (sim.aliveBySpecies[0] > 0) ? (1.f / static_cast<float>(sim.aliveBySpecies[0])) : 0.f;
+                const float inv1 = (sim.aliveBySpecies[1] > 0) ? (1.f / static_cast<float>(sim.aliveBySpecies[1])) : 0.f;
 
-                hud.setString(oss.str());
-                hud.setCharacterSize(22);
+                std::ostringstream line1;
+                line1.setf(std::ios::fixed);
+                line1 << std::setprecision(2);
+                line1 << "Cells " << (sim.aliveBySpecies[0] + sim.aliveBySpecies[1])
+                      << " | S0 " << sim.aliveBySpecies[0]
+                      << " | S1 " << sim.aliveBySpecies[1]
+                      << " | Hmul " << (sim.harvestMulSum[0] * inv0) << "/" << (sim.harvestMulSum[1] * inv1)
+                      << " | Umul " << (sim.upkeepMulSum[0] * inv0) << "/" << (sim.upkeepMulSum[1] * inv1)
+                      << " | Speed " << static_cast<int>(kTickHz) << " tps";
+
+                std::ostringstream line2;
+                line2 << "[Space] pause  [R] reset  [C] clear  LMB seed  Shift+LMB seed S1  RMB nutrients  "
+                      << "[M] move:" << (enableMovement ? "on" : "off") << "  "
+                      << "[N] nutrients:" << (showNutrients ? "on" : "off") << "  "
+                      << "[T] trails:" << (showTrails ? "on" : "off") << "  "
+                      << "[Esc] menu";
+                if (paused) line2 << "   (PAUSED)";
+
+                hud.setString(line1.str() + "\n" + line2.str());
+                hud.setCharacterSize(20);
+                hud.setLineSpacing(1.0f);
                 hud.setFillColor(sf::Color{200u, 255u, 230u, 255u});
-                hud.setPosition(sf::Vector2f{22.f, 18.f});
+                hud.setPosition(sf::Vector2f{18.f, 14.f});
                 window.draw(hud);
             }
         }
