@@ -6,9 +6,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_executable(gameoflife
     src/main.cpp
+    src/Constants.h
+    src/Types.h
+    src/Simulation.cpp
 )
 
-target_include_directories(gameoflife PRIVATE include)
+target_include_directories(gameoflife PRIVATE include src)
 
 find_package(SFML COMPONENTS System Window Graphics CONFIG REQUIRED)
 target_link_libraries(gameoflife PRIVATE SFML::System SFML::Window SFML::Graphics)
