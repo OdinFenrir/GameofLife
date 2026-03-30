@@ -54,12 +54,17 @@ int main(int argc, char** argv) {
     Simulation sim{Config::Window::GridWidth, Config::Window::GridHeight};
     sim.reset();
 
+    float viewScale = 1.0f;
+
     sf::Texture gridTexture(sf::Vector2u{Config::Window::GridWidth, Config::Window::GridHeight});
     sf::Sprite gridSprite(gridTexture);
-    gridSprite.setScale(sf::Vector2f{
-        static_cast<float>(Config::Window::CellSize),
-        static_cast<float>(Config::Window::CellSize)
-    });
+    auto updateSpriteScale = [&]() {
+        gridSprite.setScale(sf::Vector2f{
+            static_cast<float>(Config::Window::CellSize) * viewScale,
+            static_cast<float>(Config::Window::CellSize) * viewScale
+        });
+    };
+    updateSpriteScale();
 
     const std::size_t pixelCount = static_cast<std::size_t>(Config::Window::GridWidth) * Config::Window::GridHeight;
     std::vector<std::uint8_t> pixels(pixelCount * 4, 0);
@@ -97,6 +102,10 @@ int main(int argc, char** argv) {
     bool showTrails = true;
     bool enableMovement = true;
 
+    float speedMultiplier = 1.0f;
+    float viewOffsetX = 0.0f;
+    float viewOffsetY = 0.0f;
+
     float accumulator = 0.0f;
     sf::Clock clock;
 
@@ -132,6 +141,53 @@ int main(int argc, char** argv) {
                     if (keyPress->code == sf::Keyboard::Key::N) showNutrients = !showNutrients;
                     if (keyPress->code == sf::Keyboard::Key::T) showTrails = !showTrails;
                     if (keyPress->code == sf::Keyboard::Key::M) enableMovement = !enableMovement;
+
+                    if (keyPress->code == sf::Keyboard::Key::Equal || keyPress->code == sf::Keyboard::Key::Add) {
+                        speedMultiplier = std::min(4.0f, speedMultiplier * 1.5f);
+                    }
+                    if (keyPress->code == sf::Keyboard::Key::Hyphen) {
+                        speedMultiplier = std::max(0.25f, speedMultiplier / 1.5f);
+                    }
+
+                    const float panSpeed = 20.0f / viewScale;
+                    if (keyPress->code == sf::Keyboard::Key::Left) viewOffsetX -= panSpeed;
+                    if (keyPress->code == sf::Keyboard::Key::Right) viewOffsetX += panSpeed;
+                    if (keyPress->code == sf::Keyboard::Key::Up) viewOffsetY -= panSpeed;
+                    if (keyPress->code == sf::Keyboard::Key::Down) viewOffsetY += panSpeed;
+                    if (keyPress->code == sf::Keyboard::Key::Num1) {
+                        sim.clear();
+                        sim.spawnCellCluster(Config::Window::GridWidth / 2, Config::Window::GridHeight / 2, 0);
+                        viewOffsetX = 0; viewOffsetY = 0; viewScale = 1.0f;
+                        updateSpriteScale();
+                    }
+                    if (keyPress->code == sf::Keyboard::Key::Num2) {
+                        sim.clear();
+                        for (int i = 0; i < 5; ++i) {
+                            sim.spawnCellCluster(
+                                Config::Window::GridWidth / 2 + (i - 2) * 10,
+                                Config::Window::GridHeight / 2,
+                                static_cast<std::uint8_t>(i % 2)
+                            );
+                        }
+                        viewOffsetX = 0; viewOffsetY = 0; viewScale = 1.0f;
+                        updateSpriteScale();
+                    }
+                    if (keyPress->code == sf::Keyboard::Key::Num3) {
+                        sim.clear();
+                        for (int dx = -2; dx <= 2; ++dx) {
+                            for (int dy = -2; dy <= 2; ++dy) {
+                                if ((dx + dy) % 2 == 0) {
+                                    sim.spawnCellCluster(
+                                        Config::Window::GridWidth / 2 + dx * 5,
+                                        Config::Window::GridHeight / 2 + dy * 5,
+                                        0
+                                    );
+                                }
+                            }
+                        }
+                        viewOffsetX = 0; viewOffsetY = 0; viewScale = 1.0f;
+                        updateSpriteScale();
+                    }
                 }
             }
 
@@ -146,8 +202,11 @@ int main(int argc, char** argv) {
                         state = ApplicationState::Simulation;
                     }
                 } else {
-                    const int cellX = mousePress->position.x / static_cast<int>(Config::Window::CellSize);
-                    const int cellY = mousePress->position.y / static_cast<int>(Config::Window::CellSize);
+                    const float scaledCellSize = std::max(0.01f, static_cast<float>(Config::Window::CellSize) * viewScale);
+                    const float adjustedX = (static_cast<float>(mousePress->position.x) - viewOffsetX) / scaledCellSize;
+                    const float adjustedY = (static_cast<float>(mousePress->position.y) - viewOffsetY) / scaledCellSize;
+                    const int cellX = static_cast<int>(std::floor(adjustedX));
+                    const int cellY = static_cast<int>(std::floor(adjustedY));
 
                     if (cellX >= 0 && cellY >= 0 &&
                         cellX < static_cast<int>(Config::Window::GridWidth) &&
@@ -168,16 +227,25 @@ int main(int argc, char** argv) {
                     }
                 }
             }
+
+            if (const auto* mouseWheel = event->getIf<sf::Event::MouseWheelScrolled>()) {
+                if (state == ApplicationState::Simulation) {
+                    const float zoomFactor = (mouseWheel->delta > 0) ? 1.2f : 0.8f;
+                    viewScale = std::clamp(viewScale * zoomFactor, 0.5f, 4.0f);
+                    updateSpriteScale();
+                }
+            }
         }
 
         if (state == ApplicationState::Simulation && !paused) {
+            const float adjustedTickDelta = Config::Timing::TickDeltaTime / speedMultiplier;
             int steps = 0;
-            while (accumulator >= Config::Timing::TickDeltaTime && steps < Config::Timing::MaxStepsPerFrame) {
+            while (accumulator >= adjustedTickDelta && steps < Config::Timing::MaxStepsPerFrame) {
                 sim.step(enableMovement);
-                accumulator -= Config::Timing::TickDeltaTime;
+                accumulator -= adjustedTickDelta;
                 ++steps;
             }
-            accumulator = std::min(accumulator, Config::Timing::TickDeltaTime);
+            accumulator = std::min(accumulator, adjustedTickDelta);
         } else {
             accumulator = 0.0f;
         }
@@ -214,12 +282,14 @@ int main(int argc, char** argv) {
             const sf::Color& species0Old = Config::Colors::Species0Old;
             const sf::Color& species1Young = Config::Colors::Species1Young;
             const sf::Color& species1Old = Config::Colors::Species1Old;
+            const auto& cells = sim.getCells();
+            const auto& nutrients = sim.getNutrient();
 
             for (unsigned y = 0; y < Config::Window::GridHeight; ++y) {
                 for (unsigned x = 0; x < Config::Window::GridWidth; ++x) {
                     const unsigned i = x + y * Config::Window::GridWidth;
 
-                    const float normalizedNutrient = sim.getNutrient()[i] / Config::Nutrients::Maximum;
+                    const float normalizedNutrient = nutrients[i] / Config::Nutrients::Maximum;
                     const float backgroundIntensity = showNutrients ? clamp01(normalizedNutrient) : 0.0f;
 
                     float red = 0.02f + 0.08f * backgroundIntensity;
@@ -232,16 +302,16 @@ int main(int argc, char** argv) {
                         trail[i] = 0.0f;
                     }
 
-                    if (sim.getAlive()[i]) {
-                        const std::uint8_t speciesId = sim.getSpecies()[i] ? 1u : 0u;
-                        const float energyNormalized = clamp01(sim.getEnergy()[i] / Config::Cell::EnergyDisplayDivisor);
+                    const auto& cell = cells[i];
+                    if (cell.alive) {
+                        const std::uint8_t speciesId = cell.species ? 1u : 0u;
+                        const float energyNormalized = clamp01(cell.energy / Config::Cell::EnergyDisplayDivisor);
                         const float maxAgeEffective = std::max(1.0f,
-                            static_cast<float>(Config::SpeciesBase::Data[speciesId].maximumAge) * sim.getAgeMultiplier()[i]);
-                        const float ageNormalized = clamp01(static_cast<float>(sim.getAge()[i]) / maxAgeEffective);
+                            static_cast<float>(Config::SpeciesBase::Data[speciesId].maximumAge) * cell.ageMultiplier);
+                        const float ageNormalized = clamp01(static_cast<float>(cell.age) / maxAgeEffective);
 
-                        const float effectiveHarvest = Config::SpeciesBase::Data[speciesId].harvestFraction * sim.getHarvestMultiplier()[i];
-                        const float effectiveUpkeep = Config::SpeciesBase::Data[speciesId].upkeepCost * sim.getUpkeepMultiplier()[i];
-                        const float harvestUpkeepRatio = effectiveHarvest / std::max(0.001f, effectiveUpkeep);
+                        const float effectiveHarvest = Config::SpeciesBase::Data[speciesId].harvestFraction * cell.harvestMultiplier;
+                        const float effectiveUpkeep = Config::SpeciesBase::Data[speciesId].upkeepCost * cell.upkeepMultiplier;
                         const sf::Color youngColor = speciesId ? species1Young : species0Young;
                         const sf::Color oldColor = speciesId ? species1Old : species0Old;
                         const sf::Color cellColor = lerpColor(youngColor, oldColor, ageNormalized);
@@ -260,6 +330,17 @@ int main(int argc, char** argv) {
                         blue = std::min(1.0f, blue + (cellColor.b / 255.0f) * blendFactor);
                     }
 
+                    const std::uint8_t corpseSpecies = cell.corpseSpecies;
+                    if (corpseSpecies == 1) {
+                        red = std::min(1.0f, red + 0.15f);
+                        green = std::min(1.0f, green + 0.35f);
+                        blue = std::min(1.0f, blue + 0.35f);
+                    } else if (corpseSpecies == 2) {
+                        red = std::min(1.0f, red + 0.35f);
+                        green = std::min(1.0f, green + 0.10f);
+                        blue = std::min(1.0f, blue + 0.10f);
+                    }
+
                     const std::size_t pixelIndex = static_cast<std::size_t>(i) * 4;
                     pixels[pixelIndex + 0] = static_cast<std::uint8_t>(std::lround(red * 255.0f));
                     pixels[pixelIndex + 1] = static_cast<std::uint8_t>(std::lround(green * 255.0f));
@@ -269,6 +350,7 @@ int main(int argc, char** argv) {
             }
 
             gridTexture.update(pixels.data());
+            gridSprite.setPosition(sf::Vector2f{viewOffsetX, viewOffsetY});
             window.draw(gridSprite);
 
             if (hasFont) {
@@ -284,7 +366,7 @@ int main(int argc, char** argv) {
                       << " | S1 " << aliveCounts[1]
                       << " | Hmul " << (sim.getHarvestMultiplierSum()[0] * inv0) << "/" << (sim.getHarvestMultiplierSum()[1] * inv1)
                       << " | Umul " << (sim.getUpkeepMultiplierSum()[0] * inv0) << "/" << (sim.getUpkeepMultiplierSum()[1] * inv1)
-                      << " | Speed " << static_cast<int>(Config::Timing::TicksPerSecond) << " tps";
+                      << " | Speed " << static_cast<int>(Config::Timing::TicksPerSecond * speedMultiplier) << " tps";
 
                 std::ostringstream line2;
                 line2 << "[Space] pause  [R] reset  [C] clear  LMB seed  Shift+LMB seed S1  RMB nutrients  "
@@ -294,9 +376,14 @@ int main(int argc, char** argv) {
                       << "[Esc] menu";
                 if (paused) line2 << "   (PAUSED)";
 
-                hud.setString(line1.str() + "\n" + line2.str());
-                hud.setCharacterSize(20);
-                hud.setLineSpacing(1.0f);
+                std::ostringstream line3;
+                line3 << "[+/-] speed:" << std::fixed << std::setprecision(1) << speedMultiplier << "x  "
+                      << "[Arrows] pan  [Wheel] zoom:" << std::fixed << std::setprecision(1) << viewScale << "x  "
+                      << "[1-3] presets";
+
+                hud.setString(line1.str() + "\n" + line2.str() + "\n" + line3.str());
+                hud.setCharacterSize(18);
+                hud.setLineSpacing(1.1f);
                 hud.setFillColor(Config::Colors::HudText);
                 hud.setPosition(sf::Vector2f{18.0f, 14.0f});
                 window.draw(hud);
