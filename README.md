@@ -4,6 +4,9 @@ An SFML toy that combines a Game-of-Life-style neighborhood rule with an energy 
 
 This version pushes beyond “random mutation” by making mutations **heritable traits** (multipliers over metabolism and reproduction), plus a small chance to mutate the **neighbor-rule window**. The environment then *selects* which traits survive and reproduce.
 
+## Screenshot
+![Game of Life simulation screenshot](assets/gameoflife.png)
+
 ## Controls
 - Click `START` to begin
 - `Space`: pause/resume
