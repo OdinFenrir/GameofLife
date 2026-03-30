@@ -1,11 +1,32 @@
 # Game of Life
 
-An SFML toy that combines a Game-of-Life-style neighborhood rule with an energy + nutrient field (diffusion + regrowth), so patterns grow, compete, collapse, and migrate.
+## Overview
+An SFML simulation that combines a Game-of-Life-style neighborhood rule with an energy and nutrient field (diffusion + regrowth), so patterns grow, compete, collapse, and migrate.
 
 This version pushes beyond “random mutation” by making mutations **heritable traits** (multipliers over metabolism and reproduction), plus a small chance to mutate the **neighbor-rule window**. The environment then *selects* which traits survive and reproduce.
 
-## Screenshot
+## Tech Stack
+- C++17
+- SFML
+- CMake
+- vcpkg
+
+## Features
+- Trait mutation and selection pressure
+- Two baseline species seeds
+- Nutrient injection and field diffusion
+- Camera pan and zoom controls
+- Simulation speed controls and presets
+
+## Screenshots
 ![Game of Life simulation screenshot](assets/gameoflife.png)
+
+## Run Locally
+- Build steps: see `BUILDING.md`
+- Smoke test:
+  ```sh
+  gameoflife.exe --smoke
+  ```
 
 ## Controls
 - Click `START` to begin
@@ -27,8 +48,7 @@ This version pushes beyond “random mutation” by making mutations **heritable
 ## Notes
 - The grid is intentionally very fine now (`kCellSize = 2`, i.e. `1280x720` cells) for very small squares.
 
-## Build
-See `BUILDING.md`.
-
-## Smoke test
-Run `gameoflife.exe --smoke` to auto-close after a couple seconds.
+## Roadmap
+- [ ] Add deterministic scenario presets for benchmarking
+- [ ] Export simulation stats to JSON
+- [ ] Add short demo GIF to README
